@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>彼岸花开 · Higanbana</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .vignette {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 44%, transparent 46%, rgba(0,0,0,.62) 100%);
+  }
+  .ui {
+    position: fixed; z-index: 2; color: #fff; pointer-events: none; user-select: none;
+    font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", Georgia, serif;
+  }
+  .brand { top: 34px; left: 40px; font-size: 11px; letter-spacing: .5em; opacity: .42; }
+  .caption { left: 40px; bottom: 42px; }
+  .caption h1 { font-size: 30px; font-weight: 400; letter-spacing: .42em; opacity: .92; text-shadow: 0 0 24px rgba(255,40,60,.35); }
+  .caption h1 em { font-style: italic; font-size: 12px; letter-spacing: .3em; opacity: .55; margin-left: 14px; }
+  .caption p { margin-top: 12px; font-size: 10px; letter-spacing: .34em; opacity: .35; }
+  .credit { right: 40px; bottom: 46px; font-size: 10px; letter-spacing: .3em; opacity: .26; text-align: right; line-height: 2.1; }
+  .hint { top: 36px; right: 40px; font-size: 10px; letter-spacing: .3em; opacity: .18; }
+  .fallback {
+    position: fixed; inset: 0; z-index: 3; display: none; place-items: center;
+    color: #a66; font-family: serif; letter-spacing: .2em; font-size: 14px; text-align: center;
+  }
+  @media (max-width: 640px) {
+    .caption h1 { font-size: 21px; }
+    .credit, .hint { display: none; }
+    .brand, .caption { left: 24px; }
+    .caption { bottom: 30px; }
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div class="vignette"></div>
+<div class="ui brand">MANJUSAKA · 曼珠沙华</div>
+<div class="ui hint">移动鼠标 · 环视</div>
+<div class="ui caption">
+  <h1>彼岸花开<em>Higanbana · Red Spider Lily</em></h1>
+  <p>程序化花卉 · PROCEDURAL LYCORIS · THREE.JS / WEBGL</p>
+</div>
+<div class="ui credit">花开彼岸 · 花落长川<br/>GROWN FROM CODE</div>
+<div class="fallback" id="fallback">此页面需要支持 WEBGL 的浏览器</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------- 配置 ----------
+const SEED = parseInt(new URLSearchParams(location.search).get('seed') || '20260926', 10) || 20260926;
+const CFG = {
+  petalsPerWhorl: 10,  // 每轮花瓣数
+  whorls: 3,           // 花瓣轮数
+  stamens: 14,         // 雄蕊数
+  cycle: 30,           // 一片花瓣完整生命周期（秒）
+  len: 2.5,            // 花瓣基准长度
+  detach: 0.80,        // 生命周期中脱落时刻（0~1）
+};
+
+// ---------- 确定性随机 (xorshift32) ----------
+function makeRng(seed) {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5;  s >>>= 0;
+    return s / 4294967296;
+  };
+}
+const rng = makeRng(SEED);
+
+// ---------- 渲染器 / 场景 / 相机 ----------
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({
+    canvas: document.getElementById('scene'),
+    antialias: true,
+    powerPreference: 'high-performance',
+  });
+} catch (e) {
+  document.getElementById('fallback').style.display = 'grid';
+  throw e;
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 120);
+
+// ---------- 共享 uniforms ----------
+const shared = {
+  uTime:     { value: 0 },
+  uCycle:    { value: CFG.cycle },
+  uLen:      { value: CFG.len },
+  uDetach:   { value: CFG.detach },
+  uL1Dir:  { value: new THREE.Vector3(-0.52, 0.70, 0.55).normalize() },
+  uL1Col:  { value: new THREE.Color(0xfff0e6).multiplyScalar(0.85) },
+  uL2Dir:  { value: new THREE.Vector3(0.62, -0.12, -0.60).normalize() },
+  uL2Col:  { value: new THREE.Color(0xff6f82).multiplyScalar(0.62) },
+  uL3Dir:  { value: new THREE.Vector3(-0.15, 0.45, -0.88).normalize() },
+  uL3Col:  { value: new THREE.Color(0xff4a60).multiplyScalar(0.50) },
+  uAmb:    { value: new THREE.Color(0x2a141c).multiplyScalar(0.75) },
+  uColBase:   { value: new THREE.Color(0x5c0a1a) },
+  uColMid:    { value: new THREE.Color(0xb01530) },
+  uColTip:    { value: new THREE.Color(0xf5435c) },
+  uColStamen: { value: new THREE.Color(0xd01a36) },
+  uColGlow:   { value: new THREE.Color(0xffb494).multiplyScalar(2.6) },
+  uTrans:     { value: new THREE.Color(0xff2a44).multiplyScalar(0.42) },
+  uRim:       { value: new THREE.Color(0xff8098).multiplyScalar(0.55) },
+};
+
+// ---------- 花瓣 / 花蕊 顶点着色器 ----------
+// 花瓣形态完全在 GPU 上计算：脊线用圆弧闭式解，宽度、卷曲、翻卷、
+// 扭转随生命周期推进；成熟后按抛物线坠落并绕随机轴翻滚。
+const VERT = /* glsl */`
+  attribute float aOffset;
+  attribute float aAngle;
+  attribute float aWhorl;
+  attribute float aRand;
+  attribute float aKind;   // 0 = 花瓣, 1 = 花蕊
+
+  uniform float uTime;
+  uniform float uCycle;
+  uniform float uLen;
+  uniform float uDetach;
+
+  varying vec2  vUv;
+  varying vec3  vN;
+  varying vec3  vWPos;
+  varying float vOpen;
+  varying float vKind;
+  varying float vGlow;
+  varying float vFade;
+  varying float vRand;
+
+  void main() {
+    vUv = uv;
+    vRand = aRand;
+    vKind = aKind;
+
+    float ph  = fract(uTime / uCycle * (0.92 + 0.16 * aRand) + aOffset);
+    float phE = min(ph, uDetach);           // 脱落后形态冻结在脱落点，保证连续
+    vFade = 1.0 - smoothstep(0.86, 1.0, ph);
+
+    float grow  = smoothstep(0.00, 0.28, phE);
+    float openT = smoothstep(0.08, 0.52, phE);
+    float matT  = smoothstep(0.42, 0.80, phE);
+    vOpen = openT;
+
+    float u = uv.x;
+    float v = uv.y;
+
+    // 花瓣沿径向向外行走，整朵花缓慢自转
+    float ang = aAngle + uTime * 0.03 + (aRand - 0.5) * 0.15;
+    float r   = mix(0.42, 2.55 * (0.78 + 0.5 * aRand), smoothstep(0.04, 0.72, phE));
+    float y0  = mix(0.42, -0.15, openT);
+    float layerScale = 1.0 - 0.15 * aWhorl;
+
+    // 长度 / 开口角 / 弯曲总量
+    float L, w0, pitch, arc;
+    if (aKind < 0.5) {
+      L     = uLen * (0.78 + 0.44 * aRand) * layerScale * (0.22 + 0.78 * grow);
+      w0    = 0.14 * L;
+      pitch = mix(0.30, 1.35, openT) + 0.25 * matT;          // 与竖直方向的夹角
+      arc   = mix(0.10, 1.00, openT) + 0.55 * matT;          // 沿脊线总转角(向外下弯)
+    } else {
+      L     = uLen * 1.32 * (0.85 + 0.30 * aRand) * (0.25 + 0.75 * grow);
+      w0    = 0.035 * L;
+      pitch = mix(1.05, 1.30, openT);
+      arc   = -(0.35 + 0.80 * openT) - 0.25 * matT;          // 花蕊向上回勾
+    }
+
+    // 圆弧脊线闭式解 (out = X, up = Y)
+    float sp = sin(pitch), cp = cos(pitch);
+    float a2 = pitch + arc * v;
+    float X, Y;
+    if (abs(arc) < 0.02) {
+      X = L * v * sp;
+      Y = L * v * cp;
+    } else {
+      X = (L / arc) * (cp - cos(a2));
+      Y = (L / arc) * (sin(a2) - sp);
+    }
+
+    // 局部标架
+    vec3 D  = vec3(cos(ang), 0.0, sin(ang));
+    vec3 T3 = normalize(sin(a2) * D + cos(a2) * vec3(0.0, 1.0, 0.0));
+    vec3 S3 = cross(vec3(0.0, 1.0, 0.0), T3);
+    if (dot(S3, S3) < 1e-6) S3 = cross(vec3(0.0, 0.0, 1.0), T3);
+    S3 = normalize(S3);
+    vec3 N3 = normalize(cross(T3, S3));
+
+    // 宽度轮廓 / 边缘波浪
+    float wShape = pow(max(sin(clamp(v * 1.15, 0.0, 1.0) * 3.14159265), 0.0), 0.62);
+    float w      = w0 * wShape;
+    float ruffle = (0.04 + 0.12 * matT) * L * v * v;
+    float lat    = (u - 0.5) * 2.0 * w + sin(v * 9.0 + aRand * 23.0) * ruffle;
+
+    // 绕脊线扭转 + 横向舟形弯
+    float tw = (aRand - 0.5) * 1.2 * openT + sin(v * 6.0 + aRand * 9.0) * 0.18 * matT;
+    vec3 S2 = S3 * cos(tw) + N3 * sin(tw);
+    vec3 N2 = N3 * cos(tw) - S3 * sin(tw);
+    float cup = (1.0 - pow(abs(u - 0.5) * 2.0, 2.0)) * 0.30 * w;
+
+    vec3 pos = D * r + vec3(0.0, y0, 0.0)
+             + D * X + vec3(0.0, Y, 0.0)
+             + S2 * lat + N2 * cup;
+
+    // 花蕊轻摆
+    if (aKind > 0.5) {
+      pos += S3 * sin(uTime * 0.9 + aRand * 40.0) * 0.06 * v * v;
+      vGlow = smoothstep(0.90, 1.0, v) * (0.4 + 0.6 * openT) * 2.4;
+    } else {
+      vGlow = 0.0;
+    }
+
+    // 脱落之后：抛物线坠落 + 绕随机轴翻滚 + 漂移
+    float dtF = smoothstep(uDetach, 1.0, ph);
+    vec3 nrm = N2;
+    if (dtF > 0.0001) {
+      vec3 ctr  = D * r + vec3(0.0, y0, 0.0) + D * 0.9;
+      vec3 axis = normalize(D + vec3(0.0, 0.4, 0.0) + S3 * (aRand - 0.5));
+      float ta  = dtF * (2.5 + 5.0 * fract(aRand * 7.31));
+      vec3 q  = pos - ctr;
+      pos = ctr + q * cos(ta) + cross(axis, q) * sin(ta) + axis * dot(axis, q) * (1.0 - cos(ta));
+      q   = nrm;
+      nrm = q * cos(ta) + cross(axis, q) * sin(ta) + axis * dot(axis, q) * (1.0 - cos(ta));
+
+      pos += D * 0.85 * dtF * (0.6 + 0.8 * aRand);
+      pos.y += -2.4 * dtF * dtF + 0.4 * sin(uTime * 0.6 + aRand * 41.0) * dtF;
+      pos += S3 * 0.35 * sin(dtF * 5.0 + aRand * 31.0) * dtF;
+    }
+
+    vN = nrm;
+    vWPos = pos;
+    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(pos, 1.0);
+  }
+`;
+
+// ---------- 片元着色器 ----------
+const FRAG = /* glsl */`
+  uniform vec3 uColBase, uColMid, uColTip, uColStamen, uColGlow;
+  uniform vec3 uL1Dir, uL1Col, uL2Dir, uL2Col, uL3Dir, uL3Col;
+  uniform vec3 uAmb, uTrans, uRim;
+
+  varying vec2  vUv;
+  varying vec3  vN;
+  varying vec3  vWPos;
+  varying float vOpen;
+  varying float vKind;
+  varying float vGlow;
+  varying float vFade;
+  varying float vRand;
+
+  void main() {
+    vec3 N = normalize(vN);
+    if (!gl_FrontFacing) N = -N;
+    vec3 V = normalize(cameraPosition - vWPos);
+
+    float u = vUv.x, v = vUv.y;
+
+    // 沿花瓣长度的三段渐变，花蕊用略亮的色带
+    vec3 cBase = mix(uColBase, uColStamen, vKind);
+    vec3 cTip  = mix(uColTip, uColGlow * 0.4, vKind);
+    vec3 col = mix(cBase, uColMid, smoothstep(0.0, 0.55, v));
+    col = mix(col, cTip, pow(smoothstep(0.50, 1.0, v), 1.3));
+
+    // 幼瓣更深，盛开后提亮
+    col *= mix(0.78, 1.08, vOpen);
+
+    // 中脉 / 边缘
+    col += vec3(0.30, 0.04, 0.07) * smoothstep(0.10, 0.0, abs(u - 0.5)) * (1.0 - vKind) * 0.5;
+    col *= 1.0 - 0.28 * smoothstep(0.36, 0.5, abs(u - 0.5));
+
+    // 三灯照明 + 透光 + 边缘光
+    float d1 = pow(clamp(dot(N, uL1Dir) * 0.5 + 0.5, 0.0, 1.0), 1.5);
+    float d2 = pow(clamp(dot(N, uL2Dir) * 0.5 + 0.5, 0.0, 1.0), 1.5);
+    float d3 = clamp(dot(N, uL3Dir), 0.0, 1.0);
+    vec3 lit = uAmb + uL1Col * d1 + uL2Col * d2 + uL3Col * d3;
+
+    float back = pow(clamp(dot(-N, uL1Dir), 0.0, 1.0), 2.2);
+    lit += uTrans * back;
+
+    col *= lit;
+    col += uTrans * 0.35 * back;
+
+    float rim = pow(1.0 - abs(dot(N, V)), 3.0);
+    col += uRim * rim * 0.55;
+
+    // 花药自发光(进入 bloom 阈值)
+    col += uColGlow * vGlow * 0.4;
+
+    // 生命尽头淡出至黑
+    col *= vFade;
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
+function makeMaterial() {
+  return new THREE.ShaderMaterial({
+    vertexShader: VERT,
+    fragmentShader: FRAG,
+    uniforms: shared,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
+}
+
+// ---------- 实例化几何 ----------
+const basePlane = new THREE.PlaneGeometry(1, 1, 8, 18);
+
+function buildInstances(count, fillFn) {
+  const g = new THREE.InstancedBufferGeometry();
+  g.index = basePlane.index;
+  g.setAttribute('position', basePlane.getAttribute('position'));
+  g.setAttribute('uv', basePlane.getAttribute('uv'));
+  const off = new Float32Array(count), ang = new Float32Array(count),
+        wh = new Float32Array(count), rnd = new Float32Array(count), kind = new Float32Array(count);
+  for (let i = 0; i < count; i++) fillFn(i, (k, val) => {
+    if (k === 0) off[i] = val; else if (k === 1) ang[i] = val;
+    else if (k === 2) wh[i] = val; else if (k === 3) rnd[i] = val; else kind[i] = val;
+  });
+  g.setAttribute('aOffset', new THREE.InstancedBufferAttribute(off, 1));
+  g.setAttribute('aAngle', new THREE.InstancedBufferAttribute(ang, 1));
+  g.setAttribute('aWhorl', new THREE.InstancedBufferAttribute(wh, 1));
+  g.setAttribute('aRand', new THREE.InstancedBufferAttribute(rnd, 1));
+  g.setAttribute('aKind', new THREE.InstancedBufferAttribute(kind, 1));
+  g.instanceCount = count;
+  const mesh = new THREE.Mesh(g, makeMaterial());
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+const GOLDEN = 2.39996;
+const petalCount = CFG.petalsPerWhorl * CFG.whorls;
+scene.add(buildInstances(petalCount, (i, set) => {
+  const w = Math.floor(i / CFG.petalsPerWhorl);
+  const k = i % CFG.petalsPerWhorl;
+  set(0, (w / CFG.whorls + k / CFG.petalsPerWhorl + rng() * 0.06) % 1);  // 生命周期错相
+  set(1, k / CFG.petalsPerWhorl * Math.PI * 2 + w * GOLDEN + rng() * 0.2); // 方位角
+  set(2, w);
+  set(3, rng());
+  set(4, 0);
+}));
+
+scene.add(buildInstances(CFG.stamens, (i, set) => {
+  set(0, (i / CFG.stamens + 0.12 + rng() * 0.08) % 1);
+  set(1, i / CFG.stamens * Math.PI * 2 + rng() * 0.35);
+  set(2, 0);
+  set(3, rng());
+  set(4, 1);
+}));
+
+// ---------- 花心 ----------
+const core = new THREE.Mesh(
+  new THREE.SphereGeometry(0.34, 24, 16),
+  new THREE.MeshBasicMaterial({ color: 0x230509 })
+);
+core.position.y = 0.18;
+scene.add(core);
+
+// ---------- 浮尘 ----------
+const DUST = 140;
+const dustPos = new Float32Array(DUST * 3);
+const dustSeed = new Float32Array(DUST);
+for (let i = 0; i < DUST; i++) {
+  const a = rng() * Math.PI * 2, r = 2.5 + rng() * 11;
+  dustPos[i * 3] = Math.cos(a) * r;
+  dustPos[i * 3 + 1] = rng() * 11 - 4;
+  dustPos[i * 3 + 2] = Math.sin(a) * r;
+  dustSeed[i] = rng();
+}
+const dustGeo = new THREE.BufferGeometry();
+dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+dustGeo.setAttribute('aSeed', new THREE.BufferAttribute(dustSeed, 1));
+const dust = new THREE.Points(dustGeo, new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  uniforms: { uTime: shared.uTime, uCol: { value: new THREE.Color(0xff5a66) } },
+  vertexShader: /* glsl */`
+    attribute float aSeed;
+    uniform float uTime;
+    varying float vA;
+    void main() {
+      vec3 p = position;
+      p.y = mod(p.y + uTime * (0.10 + aSeed * 0.22), 11.0) - 4.0;
+      p.x += sin(uTime * 0.30 + aSeed * 43.0) * 0.6;
+      p.z += cos(uTime * 0.26 + aSeed * 31.0) * 0.6;
+      vec4 mv = modelViewMatrix * vec4(p, 1.0);
+      gl_PointSize = (1.1 + aSeed * 2.0) * (150.0 / -mv.z);
+      vA = 0.5 + 0.5 * sin(uTime * (0.4 + aSeed) + aSeed * 21.0);
+      gl_Position = projectionMatrix * mv;
+    }
+  `,
+  fragmentShader: /* glsl */`
+    uniform vec3 uCol;
+    varying float vA;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      float a = smoothstep(0.5, 0.08, d) * (0.06 + 0.13 * vA);
+      gl_FragColor = vec4(uCol * a, 1.0);
+    }
+  `,
+}));
+dust.frustumCulled = false;
+scene.add(dust);
+
+// ---------- 后期 ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.5, 0.72
+);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// ---------- 相机：缓速环绕 + 鼠标视差 ----------
+let tmx = 0, tmy = 0, mx = 0, my = 0;
+addEventListener('pointermove', (e) => {
+  tmx = (e.clientX / window.innerWidth - 0.5) * 2;
+  tmy = (e.clientY / window.innerHeight - 0.5) * 2;
+});
+
+addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- 主循环 ----------
+const clock = new THREE.Clock();
+function tick() {
+  const t = clock.getElapsedTime();
+  shared.uTime.value = t;
+
+  mx += (tmx - mx) * 0.03;
+  my += (tmy - my) * 0.03;
+  const a = t * 0.05 + mx * 0.55;
+  const R = 21.5;
+  camera.position.set(
+    Math.sin(a) * R,
+    1.15 + Math.sin(t * 0.11) * 0.55 - my * 1.7,
+    Math.cos(a) * R
+  );
+  camera.lookAt(0, 0.35, 0);
+
+  composer.render();
+  requestAnimationFrame(tick);
+}
+tick();
+</script>
+</body>
+</html>
