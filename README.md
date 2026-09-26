@@ -5,7 +5,6 @@
 ## 访问地址
 
 - **主页面**: https://erren282.github.io/Scary-game/horror.html
-- **或个人主页**: https://erren282.github.io
 
 ## 如何运行
 
